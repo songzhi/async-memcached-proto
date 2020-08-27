@@ -1,5 +1,5 @@
 //! [Memcached Binary Protocol](https://github.com/memcached/memcached/wiki/BinaryProtocolRevamped)
-use super::code::{Magic, Opcode};
+use super::code::{Magic, Opcode, Status};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use bytes::{Buf, Bytes, BytesMut};
 use futures_lite::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -118,7 +118,7 @@ impl PacketHeader {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Extras {
     /// No Extra data
     None,
@@ -270,15 +270,90 @@ impl Extras {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Packet {
     pub header: PacketHeader,
     pub extras: Extras,
     pub key: Bytes,
-    pub value: Bytes,
+    pub val: Bytes,
 }
 
 impl Packet {
+    /// Constructs new `Request`, just pass `Bytes::new()` to represents an empty key or value;
+    ///
+    /// # Examples
+    /// ```rust
+    /// use async_memcached_proto::binary::{Packet, PacketHeader, Opcode, Extras};
+    /// use bytes::Bytes;
+    ///
+    /// let p = Packet::request(Opcode::NoOp, 0, 0, 0, Extras::None, Bytes::new(), Bytes::new());
+    /// assert_eq!(p.header.key_len + p.header.extras_len, p.header.body_len)
+    /// ```
+    pub fn request(
+        opcode: Opcode,
+        vbucket_id: u16,
+        opaque: u32,
+        cas: u64,
+        extras: Extras,
+        key: Bytes,
+        val: Bytes,
+    ) -> Self {
+        let header = PacketHeader {
+            magic: Magic::Request,
+            opcode,
+            key_len: key.len() as u16,
+            extras_len: extras.len() as u8,
+            data_type: 0,
+            vbucket_id_or_status: vbucket_id,
+            body_len: (key.len() + extras.len() + val.len()) as u32,
+            opaque,
+            cas,
+        };
+        Self {
+            header,
+            extras,
+            key,
+            val,
+        }
+    }
+    /// Constructs new `Response`, just pass `Bytes::new()` to represents an empty key or value;
+    ///
+    /// # Examples
+    /// ```rust
+    /// use async_memcached_proto::binary::{Packet, PacketHeader, Opcode, Extras, Status};
+    /// use bytes::Bytes;
+    ///
+    /// let p = Packet::response(Opcode::NoOp, Status::NoError, 0, 0,
+    ///     Extras::None, Bytes::new(), Bytes::new());
+    /// assert_eq!(p.header.key_len + p.header.extras_len, p.header.body_len)
+    /// ```
+    pub fn response(
+        opcode: Opcode,
+        status: Status,
+        opaque: u32,
+        cas: u64,
+        extras: Extras,
+        key: Bytes,
+        val: Bytes,
+    ) -> Self {
+        let header = PacketHeader {
+            magic: Magic::Request,
+            opcode,
+            key_len: key.len() as u16,
+            extras_len: extras.len() as u8,
+            data_type: 0,
+            vbucket_id_or_status: status as u16,
+            body_len: (key.len() + extras.len() + val.len()) as u32,
+            opaque,
+            cas,
+        };
+        Self {
+            header,
+            extras,
+            key,
+            val,
+        }
+    }
     /// Constructs new `Packet`, just pass `Bytes::new()` to represents an empty key or value;
     ///
     /// it will automatically calculate and set `key_length`, `extras_length` and `total_body_length`
@@ -292,15 +367,15 @@ impl Packet {
     ///     Extras::None, Bytes::from("Hello"), Bytes::new());
     /// assert_eq!(p.header.key_len + p.header.extras_len, p.header.body_len)
     /// ```
-    pub fn new(mut header: PacketHeader, extras: Extras, key: Bytes, value: Bytes) -> Self {
+    pub fn new(mut header: PacketHeader, extras: Extras, key: Bytes, val: Bytes) -> Self {
         header.extras_len = extras.len() as u8;
         header.key_len = key.len() as u16;
-        header.body_len = (key.len() + extras.len() + value.len()) as u32;
+        header.body_len = (key.len() + extras.len() + val.len()) as u32;
         Self {
             header,
             extras,
             key,
-            value,
+            val,
         }
     }
     #[inline]
@@ -312,13 +387,20 @@ impl Packet {
     pub fn is_response(&self) -> bool {
         matches!(self.header.magic, Magic::Response)
     }
-
+    /// Response status;
+    /// # Panics
+    /// if data is incorrect or packet isn't response
+    #[inline]
+    pub fn status(&self) -> Status {
+        debug_assert!(self.is_response());
+        Status::from_u16(self.header.vbucket_id_or_status).unwrap()
+    }
     /// Write asynchronously with flush;
     pub async fn write<W: AsyncWrite + Unpin>(&self, w: &mut W) -> io::Result<()> {
         self.header.write(w).await?;
         self.extras.write(w).await?;
         w.write_all(self.key.bytes()).await?;
-        w.write_all(self.value.bytes()).await?;
+        w.write_all(self.val.bytes()).await?;
         w.flush().await?;
         Ok(())
     }
@@ -327,7 +409,7 @@ impl Packet {
         self.header.write_sync(w)?;
         self.extras.write_sync(w)?;
         w.write_all(self.key.bytes())?;
-        w.write_all(self.value.bytes())?;
+        w.write_all(self.val.bytes())?;
         w.flush()?;
         Ok(())
     }
@@ -363,7 +445,7 @@ impl Packet {
             header,
             extras,
             key,
-            value,
+            val: value,
         })
     }
     /// Read synchronously;
@@ -398,7 +480,7 @@ impl Packet {
             header,
             extras,
             key,
-            value,
+            val: value,
         })
     }
 }
@@ -408,7 +490,7 @@ pub struct PacketRef<'a> {
     pub header: &'a PacketHeader,
     pub extras: &'a Extras,
     pub key: &'a [u8],
-    pub value: &'a [u8],
+    pub val: &'a [u8],
 }
 
 impl<'a> PacketRef<'a> {
@@ -416,13 +498,13 @@ impl<'a> PacketRef<'a> {
         header: &'a PacketHeader,
         extras: &'a Extras,
         key: &'a [u8],
-        value: &'a [u8],
+        val: &'a [u8],
     ) -> PacketRef<'a> {
         PacketRef {
             header,
             extras,
             key,
-            value,
+            val,
         }
     }
 
@@ -431,7 +513,7 @@ impl<'a> PacketRef<'a> {
         self.header.write_sync(w)?;
         self.extras.write_sync(w)?;
         w.write_all(self.key)?;
-        w.write_all(self.value)?;
+        w.write_all(self.val)?;
 
         Ok(())
     }
@@ -441,8 +523,27 @@ impl<'a> PacketRef<'a> {
         self.header.write(w).await?;
         self.extras.write(w).await?;
         w.write_all(self.key).await?;
-        w.write_all(self.value).await?;
+        w.write_all(self.val).await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn basics() {
+        let header = PacketHeader::request(Opcode::Flush);
+        let extras = Extras::Flush { expiration: 1234 };
+        let key = "test:binary_protocol:hello";
+        let val = "world";
+        let packet = Packet::new(header, extras, key.into(), val.into());
+        let mut buf = vec![];
+        packet.write_sync(&mut buf).unwrap();
+        let mut r = buf.as_slice();
+        let packet_read = Packet::read_sync(&mut r).unwrap();
+        assert_eq!(packet, packet_read);
     }
 }
