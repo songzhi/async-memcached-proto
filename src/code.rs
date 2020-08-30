@@ -1,3 +1,5 @@
+use crate::error::ProtoError;
+use crate::Result;
 use num_derive::FromPrimitive;
 
 #[derive(Debug, Eq, PartialEq, Copy, Clone, FromPrimitive)]
@@ -117,6 +119,12 @@ impl Status {
             Self::TemporaryFailure => "temporary failure",
             Self::AuthenticationRequired => "authentication required/not successful",
             Self::AuthenticationFurtherStepRequired => "further authentication steps required",
+        }
+    }
+    pub fn ok_or(self, detail: Option<String>) -> Result<()> {
+        match self {
+            Self::NoError => Ok(()),
+            status => Err(ProtoError::from_status(status, detail).into()),
         }
     }
 }

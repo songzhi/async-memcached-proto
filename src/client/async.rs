@@ -22,13 +22,13 @@ impl<T> Proto for T where
 
 #[async_trait]
 pub trait Operation {
-    async fn set(&mut self, key: &[u8], value: &[u8], flags: u32, expiration: u32) -> Result<()>;
-    async fn add(&mut self, key: &[u8], value: &[u8], flags: u32, expiration: u32) -> Result<()>;
+    async fn set(&mut self, key: &[u8], val: &[u8], flags: u32, expiration: u32) -> Result<()>;
+    async fn add(&mut self, key: &[u8], val: &[u8], flags: u32, expiration: u32) -> Result<()>;
     async fn delete(&mut self, key: &[u8]) -> Result<()>;
     async fn replace(
         &mut self,
         key: &[u8],
-        value: &[u8],
+        val: &[u8],
         flags: u32,
         expiration: u32,
     ) -> Result<()>;
@@ -48,8 +48,8 @@ pub trait Operation {
         initial: u64,
         expiration: u32,
     ) -> Result<u64>;
-    async fn append(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
-    async fn prepend(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
+    async fn append(&mut self, key: &[u8], val: &[u8]) -> Result<()>;
+    async fn prepend(&mut self, key: &[u8], val: &[u8]) -> Result<()>;
     async fn touch(&mut self, key: &[u8], expiration: u32) -> Result<()>;
 }
 
@@ -58,7 +58,7 @@ pub trait CasOperation {
     async fn set_cas(
         &mut self,
         key: &[u8],
-        value: &[u8],
+        val: &[u8],
         flags: u32,
         expiration: u32,
         cas: u64,
@@ -66,14 +66,14 @@ pub trait CasOperation {
     async fn add_cas(
         &mut self,
         key: &[u8],
-        value: &[u8],
+        val: &[u8],
         flags: u32,
         expiration: u32,
     ) -> Result<u64>;
     async fn replace_cas(
         &mut self,
         key: &[u8],
-        value: &[u8],
+        val: &[u8],
         flags: u32,
         expiration: u32,
         cas: u64,
@@ -96,8 +96,8 @@ pub trait CasOperation {
         expiration: u32,
         cas: u64,
     ) -> Result<(u64, u64)>;
-    async fn append_cas(&mut self, key: &[u8], value: &[u8], cas: u64) -> Result<u64>;
-    async fn prepend_cas(&mut self, key: &[u8], value: &[u8], cas: u64) -> Result<u64>;
+    async fn append_cas(&mut self, key: &[u8], val: &[u8], cas: u64) -> Result<u64>;
+    async fn prepend_cas(&mut self, key: &[u8], val: &[u8], cas: u64) -> Result<u64>;
     async fn touch_cas(&mut self, key: &[u8], expiration: u32, cas: u64) -> Result<u64>;
 }
 
@@ -126,14 +126,14 @@ pub trait NoReplyOperation {
     async fn set_noreply(
         &mut self,
         key: &[u8],
-        value: &[u8],
+        val: &[u8],
         flags: u32,
         expiration: u32,
     ) -> Result<()>;
     async fn add_noreply(
         &mut self,
         key: &[u8],
-        value: &[u8],
+        val: &[u8],
         flags: u32,
         expiration: u32,
     ) -> Result<()>;
@@ -141,7 +141,7 @@ pub trait NoReplyOperation {
     async fn replace_noreply(
         &mut self,
         key: &[u8],
-        value: &[u8],
+        val: &[u8],
         flags: u32,
         expiration: u32,
     ) -> Result<()>;
@@ -159,8 +159,8 @@ pub trait NoReplyOperation {
         initial: u64,
         expiration: u32,
     ) -> Result<()>;
-    async fn append_noreply(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
-    async fn prepend_noreply(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
+    async fn append_noreply(&mut self, key: &[u8], val: &[u8]) -> Result<()>;
+    async fn prepend_noreply(&mut self, key: &[u8], val: &[u8]) -> Result<()>;
 }
 
 #[async_trait]

@@ -9,14 +9,15 @@ use std::io::{self, Read, Write};
 
 pub trait SyncOps: Sized {
     /// Write synchronously without flush;
-    fn write<W: Write>(&self, w: &mut W) -> io::Result<()>;
-    fn read<R: Read>(r: &mut R) -> io::Result<Self>;
+    fn write_to<W: Write>(&self, w: &mut W) -> io::Result<()>;
+    fn read_from<R: Read>(r: &mut R) -> io::Result<Self>;
 }
+
 #[async_trait]
 pub trait AsyncOps: Sized {
     /// Write asynchronously without flush;
-    async fn write<W: AsyncWrite + Unpin + Send>(&self, w: &mut W) -> io::Result<()>;
-    async fn read<R: AsyncRead + Unpin + Send>(r: &mut R) -> io::Result<Self>;
+    async fn write_to<W: AsyncWrite + Unpin + Send>(&self, w: &mut W) -> io::Result<()>;
+    async fn read_from<R: AsyncRead + Unpin + Send>(r: &mut R) -> io::Result<Self>;
 }
 
 // Byte/     0       |       1       |       2       |       3       |
@@ -51,34 +52,54 @@ pub struct PacketHeader {
 }
 
 impl PacketHeader {
-    /// Request header with default(zeroed) values
-    #[inline]
-    pub fn request(opcode: Opcode) -> Self {
+    pub fn request_from_payload(
+        opcode: Opcode,
+        vbucket_id: u16,
+        opaque: u32,
+        cas: u64,
+        extras: &Extras,
+        key: &[u8],
+        val: &[u8],
+    ) -> Self {
+        let key_len = key.len() as u16;
+        let extras_len = extras.len() as u8;
+        let body_len = (key.len() + extras.len() + val.len()) as u32;
+
         Self {
             magic: Magic::Request,
             opcode,
-            key_len: 0,
-            extras_len: 0,
+            key_len,
+            extras_len,
             data_type: 0,
-            vbucket_id_or_status: 0,
-            body_len: 0,
-            opaque: 0,
-            cas: 0,
+            vbucket_id_or_status: vbucket_id,
+            body_len,
+            opaque,
+            cas,
         }
     }
-    /// Response header with default(zeroed) values
-    #[inline]
-    pub fn response(opcode: Opcode) -> Self {
+    pub fn response_from_payload(
+        opcode: Opcode,
+        status: Status,
+        opaque: u32,
+        cas: u64,
+        extras: &Extras,
+        key: &[u8],
+        val: &[u8],
+    ) -> Self {
+        let key_len = key.len() as u16;
+        let extras_len = extras.len() as u8;
+        let body_len = (key.len() + extras.len() + val.len()) as u32;
+
         Self {
-            magic: Magic::Response,
+            magic: Magic::Request,
             opcode,
-            key_len: 0,
-            extras_len: 0,
+            key_len,
+            extras_len,
             data_type: 0,
-            vbucket_id_or_status: 0,
-            body_len: 0,
-            opaque: 0,
-            cas: 0,
+            vbucket_id_or_status: status as u16,
+            body_len,
+            opaque,
+            cas,
         }
     }
     /// Size of `PacketHeader` in bytes
@@ -107,7 +128,7 @@ impl PacketHeader {
 
 #[async_trait]
 impl AsyncOps for PacketHeader {
-    async fn write<W: AsyncWrite + Unpin + Send>(&self, w: &mut W) -> io::Result<()> {
+    async fn write_to<W: AsyncWrite + Unpin + Send>(&self, w: &mut W) -> io::Result<()> {
         w.write_all(&(self.magic as u8).to_be_bytes()).await?;
         w.write_all(&(self.opcode as u8).to_be_bytes()).await?;
         w.write_all(&self.key_len.to_be_bytes()).await?;
@@ -121,14 +142,15 @@ impl AsyncOps for PacketHeader {
         Ok(())
     }
 
-    async fn read<R: AsyncRead + Unpin + Send>(r: &mut R) -> io::Result<Self> {
+    async fn read_from<R: AsyncRead + Unpin + Send>(r: &mut R) -> io::Result<Self> {
         let mut buf = [0u8; Self::size()];
         r.read_exact(&mut buf).await?;
         Self::parse(&buf)
     }
 }
+
 impl SyncOps for PacketHeader {
-    fn write<W: Write>(&self, w: &mut W) -> io::Result<()> {
+    fn write_to<W: Write>(&self, w: &mut W) -> io::Result<()> {
         w.write_u8(self.magic as u8)?;
         w.write_u8(self.opcode as u8)?;
         w.write_u16::<BigEndian>(self.key_len)?;
@@ -141,7 +163,7 @@ impl SyncOps for PacketHeader {
         Ok(())
     }
 
-    fn read<R: Read>(r: &mut R) -> io::Result<Self> {
+    fn read_from<R: Read>(r: &mut R) -> io::Result<Self> {
         let mut buf = [0u8; Self::size()];
         r.read_exact(&mut buf)?;
         Self::parse(&buf)
@@ -159,7 +181,7 @@ pub enum Extras {
     /// Extra data for incr/decr
     Counter {
         amount: u64,
-        initial_value: u64,
+        initial: u64,
         expiration: u32,
     },
     /// Extra data for flush
@@ -204,11 +226,11 @@ impl Extras {
             }
             Self::Counter {
                 amount,
-                initial_value,
+                initial,
                 expiration,
             } => {
                 w.write_all(&amount.to_be_bytes()).await?;
-                w.write_all(&initial_value.to_be_bytes()).await?;
+                w.write_all(&initial.to_be_bytes()).await?;
                 w.write_all(&expiration.to_be_bytes()).await?;
             }
             Self::Flush { expiration } => {
@@ -239,11 +261,11 @@ impl Extras {
             }
             Self::Counter {
                 amount,
-                initial_value,
+                initial,
                 expiration,
             } => {
                 w.write_u64::<BigEndian>(*amount)?;
-                w.write_u64::<BigEndian>(*initial_value)?;
+                w.write_u64::<BigEndian>(*initial)?;
                 w.write_u32::<BigEndian>(*expiration)?;
             }
             Self::Flush { expiration } => {
@@ -282,7 +304,7 @@ impl Extras {
             Opcode::Increment | Opcode::IncrementQ | Opcode::Decrement | Opcode::DecrementQ => {
                 Self::Counter {
                     amount: buf.read_u64::<BigEndian>()?,
-                    initial_value: buf.read_u64::<BigEndian>()?,
+                    initial: buf.read_u64::<BigEndian>()?,
                     expiration: buf.read_u32::<BigEndian>()?,
                 }
             }
@@ -386,21 +408,7 @@ impl Packet {
     }
     /// Constructs new `Packet`, just pass `Bytes::new()` to represents an empty key or value;
     ///
-    /// it will automatically calculate and set `key_length`, `extras_length` and `total_body_length`
-    /// by checking args.
-    /// # Examples
-    /// ```rust
-    /// use memcached_proto::{Packet, PacketHeader, Opcode, Extras};
-    /// use bytes::Bytes;
-    ///
-    /// let p = Packet::new(PacketHeader::request(Opcode::NoOp),
-    ///     Extras::None, Bytes::from("Hello"), Bytes::new());
-    /// assert_eq!(p.header.key_len + p.header.extras_len, p.header.body_len)
-    /// ```
-    pub fn new(mut header: PacketHeader, extras: Extras, key: Bytes, val: Bytes) -> Self {
-        header.extras_len = extras.len() as u8;
-        header.key_len = key.len() as u16;
-        header.body_len = (key.len() + extras.len() + val.len()) as u32;
+    pub fn new(header: PacketHeader, extras: Extras, key: Bytes, val: Bytes) -> Self {
         Self {
             header,
             extras,
@@ -428,8 +436,8 @@ impl Packet {
 }
 
 impl SyncOps for Packet {
-    fn write<W: Write>(&self, w: &mut W) -> io::Result<()> {
-        SyncOps::write(&self.header, w)?;
+    fn write_to<W: Write>(&self, w: &mut W) -> io::Result<()> {
+        SyncOps::write_to(&self.header, w)?;
         self.extras.write_sync(w)?;
         w.write_all(self.key.bytes())?;
         w.write_all(self.val.bytes())?;
@@ -437,8 +445,8 @@ impl SyncOps for Packet {
         Ok(())
     }
 
-    fn read<R: Read>(r: &mut R) -> io::Result<Self> {
-        let header: PacketHeader = SyncOps::read(r)?;
+    fn read_from<R: Read>(r: &mut R) -> io::Result<Self> {
+        let header: PacketHeader = SyncOps::read_from(r)?;
 
         let body_len = header.body_len as usize;
         let mut buf = BytesMut::with_capacity(body_len);
@@ -462,10 +470,11 @@ impl SyncOps for Packet {
         })
     }
 }
+
 #[async_trait]
 impl AsyncOps for Packet {
-    async fn write<W: AsyncWrite + Unpin + Send>(&self, w: &mut W) -> io::Result<()> {
-        AsyncOps::write(&self.header, w).await?;
+    async fn write_to<W: AsyncWrite + Unpin + Send>(&self, w: &mut W) -> io::Result<()> {
+        AsyncOps::write_to(&self.header, w).await?;
         self.extras.write(w).await?;
         w.write_all(self.key.bytes()).await?;
         w.write_all(self.val.bytes()).await?;
@@ -473,8 +482,8 @@ impl AsyncOps for Packet {
         Ok(())
     }
 
-    async fn read<R: AsyncRead + Unpin + Send>(r: &mut R) -> io::Result<Self> {
-        let header: PacketHeader = AsyncOps::read(r).await?;
+    async fn read_from<R: AsyncRead + Unpin + Send>(r: &mut R) -> io::Result<Self> {
+        let header: PacketHeader = AsyncOps::read_from(r).await?;
 
         let body_len = header.body_len as usize;
         let mut buf = BytesMut::with_capacity(body_len);
@@ -524,8 +533,8 @@ impl<'a> PacketRef<'a> {
 }
 
 impl<'a> SyncOps for PacketRef<'a> {
-    fn write<W: Write>(&self, w: &mut W) -> io::Result<()> {
-        SyncOps::write(self.header, w)?;
+    fn write_to<W: Write>(&self, w: &mut W) -> io::Result<()> {
+        SyncOps::write_to(self.header, w)?;
         self.extras.write_sync(w)?;
         w.write_all(self.key)?;
         w.write_all(self.val)?;
@@ -533,15 +542,15 @@ impl<'a> SyncOps for PacketRef<'a> {
         Ok(())
     }
     /// unimplemented
-    fn read<R: Read>(_r: &mut R) -> io::Result<Self> {
+    fn read_from<R: Read>(_r: &mut R) -> io::Result<Self> {
         unimplemented!()
     }
 }
 
 #[async_trait]
 impl<'a> AsyncOps for PacketRef<'a> {
-    async fn write<W: AsyncWrite + Unpin + Send>(&self, w: &mut W) -> io::Result<()> {
-        AsyncOps::write(self.header, w).await?;
+    async fn write_to<W: AsyncWrite + Unpin + Send>(&self, w: &mut W) -> io::Result<()> {
+        AsyncOps::write_to(self.header, w).await?;
         self.extras.write(w).await?;
         w.write_all(self.key).await?;
         w.write_all(self.val).await?;
@@ -549,7 +558,7 @@ impl<'a> AsyncOps for PacketRef<'a> {
         Ok(())
     }
     /// unimplemented
-    async fn read<R: AsyncRead + Unpin + Send>(_r: &mut R) -> io::Result<Self> {
+    async fn read_from<R: AsyncRead + Unpin + Send>(_r: &mut R) -> io::Result<Self> {
         unimplemented!()
     }
 }
@@ -585,10 +594,10 @@ mod tests {
                 b"world".as_ref().into(),
             );
 
-            req_packet.write(&mut stream).unwrap();
+            req_packet.write_to(&mut stream).unwrap();
             stream.flush().unwrap();
 
-            let resp_packet = Packet::read(&mut stream).unwrap();
+            let resp_packet = Packet::read_from(&mut stream).unwrap();
 
             assert_eq!(resp_packet.status(), Status::NoError);
         }
@@ -604,10 +613,10 @@ mod tests {
                 Bytes::new(),
             );
 
-            req_packet.write(&mut stream).unwrap();
+            req_packet.write_to(&mut stream).unwrap();
             stream.flush().unwrap();
 
-            let resp_packet = Packet::read(&mut stream).unwrap();
+            let resp_packet = Packet::read_from(&mut stream).unwrap();
 
             assert_eq!(resp_packet.status(), Status::NoError);
             assert_eq!(&resp_packet.val.bytes(), b"world");
@@ -624,10 +633,10 @@ mod tests {
                 Bytes::new(),
             );
 
-            req_packet.write(&mut stream).unwrap();
+            req_packet.write_to(&mut stream).unwrap();
             stream.flush().unwrap();
 
-            let resp_packet = Packet::read(&mut stream).unwrap();
+            let resp_packet = Packet::read_from(&mut stream).unwrap();
 
             assert_eq!(resp_packet.status(), Status::NoError);
         }
