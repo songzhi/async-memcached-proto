@@ -1,10 +1,23 @@
 //! [Memcached Binary Protocol](https://github.com/memcached/memcached/wiki/BinaryProtocolRevamped)
 use crate::code::{Magic, Opcode, Status};
+use async_trait::async_trait;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use bytes::{Buf, Bytes, BytesMut};
 use futures_lite::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use num_traits::FromPrimitive;
 use std::io::{self, Read, Write};
+
+pub trait SyncOps: Sized {
+    /// Write synchronously without flush;
+    fn write<W: Write>(&self, w: &mut W) -> io::Result<()>;
+    fn read<R: Read>(r: &mut R) -> io::Result<Self>;
+}
+#[async_trait]
+pub trait AsyncOps: Sized {
+    /// Write asynchronously without flush;
+    async fn write<W: AsyncWrite + Unpin + Send>(&self, w: &mut W) -> io::Result<()>;
+    async fn read<R: AsyncRead + Unpin + Send>(r: &mut R) -> io::Result<Self>;
+}
 
 // Byte/     0       |       1       |       2       |       3       |
 //    /              |               |               |               |
@@ -72,33 +85,7 @@ impl PacketHeader {
     pub const fn size() -> usize {
         1 + 1 + 2 + 1 + 1 + 2 + 4 + 4 + 8
     }
-    /// Write asynchronously without flush;
-    pub async fn write<W: AsyncWrite + Unpin>(&self, w: &mut W) -> io::Result<()> {
-        w.write_all(&(self.magic as u8).to_be_bytes()).await?;
-        w.write_all(&(self.opcode as u8).to_be_bytes()).await?;
-        w.write_all(&self.key_len.to_be_bytes()).await?;
-        w.write_all(&self.extras_len.to_be_bytes()).await?;
-        w.write_all(&self.data_type.to_be_bytes()).await?;
-        w.write_all(&self.vbucket_id_or_status.to_be_bytes())
-            .await?;
-        w.write_all(&self.body_len.to_be_bytes()).await?;
-        w.write_all(&self.opaque.to_be_bytes()).await?;
-        w.write_all(&self.cas.to_be_bytes()).await?;
-        Ok(())
-    }
-    /// Write synchronously without flush;
-    pub fn write_sync<W: Write>(&self, w: &mut W) -> io::Result<()> {
-        w.write_u8(self.magic as u8)?;
-        w.write_u8(self.opcode as u8)?;
-        w.write_u16::<BigEndian>(self.key_len)?;
-        w.write_u8(self.extras_len)?;
-        w.write_u8(self.data_type)?;
-        w.write_u16::<BigEndian>(self.vbucket_id_or_status)?;
-        w.write_u32::<BigEndian>(self.body_len)?;
-        w.write_u32::<BigEndian>(self.opaque)?;
-        w.write_u64::<BigEndian>(self.cas)?;
-        Ok(())
-    }
+
     /// Parse from buffer;
     /// if anything incorrect such as wrong magic number returns `None`;
     /// # Panics
@@ -115,6 +102,49 @@ impl PacketHeader {
             opaque: buf.get_u32(),
             cas: buf.get_u64(),
         })
+    }
+}
+
+#[async_trait]
+impl AsyncOps for PacketHeader {
+    async fn write<W: AsyncWrite + Unpin + Send>(&self, w: &mut W) -> io::Result<()> {
+        w.write_all(&(self.magic as u8).to_be_bytes()).await?;
+        w.write_all(&(self.opcode as u8).to_be_bytes()).await?;
+        w.write_all(&self.key_len.to_be_bytes()).await?;
+        w.write_all(&self.extras_len.to_be_bytes()).await?;
+        w.write_all(&self.data_type.to_be_bytes()).await?;
+        w.write_all(&self.vbucket_id_or_status.to_be_bytes())
+            .await?;
+        w.write_all(&self.body_len.to_be_bytes()).await?;
+        w.write_all(&self.opaque.to_be_bytes()).await?;
+        w.write_all(&self.cas.to_be_bytes()).await?;
+        Ok(())
+    }
+
+    async fn read<R: AsyncRead + Unpin + Send>(r: &mut R) -> io::Result<Self> {
+        let mut buf = [0u8; Self::size()];
+        r.read_exact(&mut buf).await?;
+        Self::parse(&buf)
+    }
+}
+impl SyncOps for PacketHeader {
+    fn write<W: Write>(&self, w: &mut W) -> io::Result<()> {
+        w.write_u8(self.magic as u8)?;
+        w.write_u8(self.opcode as u8)?;
+        w.write_u16::<BigEndian>(self.key_len)?;
+        w.write_u8(self.extras_len)?;
+        w.write_u8(self.data_type)?;
+        w.write_u16::<BigEndian>(self.vbucket_id_or_status)?;
+        w.write_u32::<BigEndian>(self.body_len)?;
+        w.write_u32::<BigEndian>(self.opaque)?;
+        w.write_u64::<BigEndian>(self.cas)?;
+        Ok(())
+    }
+
+    fn read<R: Read>(r: &mut R) -> io::Result<Self> {
+        let mut buf = [0u8; Self::size()];
+        r.read_exact(&mut buf)?;
+        Self::parse(&buf)
     }
 }
 
@@ -395,51 +425,34 @@ impl Packet {
         debug_assert!(self.is_response());
         Status::from_u16(self.header.vbucket_id_or_status).unwrap()
     }
-    /// Write asynchronously with flush;
-    pub async fn write<W: AsyncWrite + Unpin>(&self, w: &mut W) -> io::Result<()> {
-        self.header.write(w).await?;
-        self.extras.write(w).await?;
-        w.write_all(self.key.bytes()).await?;
-        w.write_all(self.val.bytes()).await?;
-        w.flush().await?;
-        Ok(())
-    }
-    /// Write synchronously with flush;
-    pub fn write_sync<W: Write>(&self, w: &mut W) -> io::Result<()> {
-        self.header.write_sync(w)?;
+}
+
+impl SyncOps for Packet {
+    fn write<W: Write>(&self, w: &mut W) -> io::Result<()> {
+        SyncOps::write(&self.header, w)?;
         self.extras.write_sync(w)?;
         w.write_all(self.key.bytes())?;
         w.write_all(self.val.bytes())?;
         w.flush()?;
         Ok(())
     }
-    /// Read asynchronously;
-    pub async fn read<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<Packet> {
-        let mut buf = [0u8; PacketHeader::size()];
-        r.read_exact(&mut buf).await?;
-        let header = PacketHeader::parse(&buf)?;
+
+    fn read<R: Read>(r: &mut R) -> io::Result<Self> {
+        let header: PacketHeader = SyncOps::read(r)?;
 
         let body_len = header.body_len as usize;
         let mut buf = BytesMut::with_capacity(body_len);
         unsafe {
             buf.set_len(body_len);
         }
+        r.read_exact(buf.as_mut())?;
 
-        let extras = {
-            let mut extras = buf.split_to(header.extras_len as usize);
-            r.read_exact(extras.as_mut()).await?;
-            Extras::parse(header.opcode, extras.bytes())?
-        };
-        let key = {
-            let mut key = buf.split_to(header.key_len as usize);
-            r.read_exact(key.as_mut()).await?;
-            key.freeze()
-        };
-        let value = {
-            let mut value = buf;
-            r.read_exact(value.as_mut()).await?;
-            value.freeze()
-        };
+        let extras = Extras::parse(
+            header.opcode,
+            buf.split_to(header.extras_len as usize).bytes(),
+        )?;
+        let key = buf.split_to(header.key_len as usize).freeze();
+        let value = buf.freeze();
 
         Ok(Packet {
             header,
@@ -448,33 +461,34 @@ impl Packet {
             val: value,
         })
     }
-    /// Read synchronously;
-    pub fn read_sync<R: Read>(r: &mut R) -> io::Result<Packet> {
-        let mut buf = [0u8; PacketHeader::size()];
-        r.read_exact(&mut buf)?;
-        let header = PacketHeader::parse(&buf)?;
+}
+#[async_trait]
+impl AsyncOps for Packet {
+    async fn write<W: AsyncWrite + Unpin + Send>(&self, w: &mut W) -> io::Result<()> {
+        AsyncOps::write(&self.header, w).await?;
+        self.extras.write(w).await?;
+        w.write_all(self.key.bytes()).await?;
+        w.write_all(self.val.bytes()).await?;
+        w.flush().await?;
+        Ok(())
+    }
+
+    async fn read<R: AsyncRead + Unpin + Send>(r: &mut R) -> io::Result<Self> {
+        let header: PacketHeader = AsyncOps::read(r).await?;
 
         let body_len = header.body_len as usize;
         let mut buf = BytesMut::with_capacity(body_len);
         unsafe {
             buf.set_len(body_len);
         }
+        r.read_exact(buf.as_mut()).await?;
 
-        let extras = {
-            let mut extras = buf.split_to(header.extras_len as usize);
-            r.read_exact(extras.as_mut())?;
-            Extras::parse(header.opcode, extras.bytes())?
-        };
-        let key = {
-            let mut key = buf.split_to(header.key_len as usize);
-            r.read_exact(key.as_mut())?;
-            key.freeze()
-        };
-        let value = {
-            let mut value = buf;
-            r.read_exact(value.as_mut())?;
-            value.freeze()
-        };
+        let extras = Extras::parse(
+            header.opcode,
+            buf.split_to(header.extras_len as usize).bytes(),
+        )?;
+        let key = buf.split_to(header.key_len as usize).freeze();
+        let value = buf.freeze();
 
         Ok(Packet {
             header,
@@ -507,43 +521,115 @@ impl<'a> PacketRef<'a> {
             val,
         }
     }
+}
 
-    #[inline]
-    pub fn write_sync<W: Write>(&self, w: &mut W) -> io::Result<()> {
-        self.header.write_sync(w)?;
+impl<'a> SyncOps for PacketRef<'a> {
+    fn write<W: Write>(&self, w: &mut W) -> io::Result<()> {
+        SyncOps::write(self.header, w)?;
         self.extras.write_sync(w)?;
         w.write_all(self.key)?;
         w.write_all(self.val)?;
 
         Ok(())
     }
+    /// unimplemented
+    fn read<R: Read>(_r: &mut R) -> io::Result<Self> {
+        unimplemented!()
+    }
+}
 
-    #[inline]
-    pub async fn write<W: AsyncWrite + Unpin>(&self, w: &mut W) -> io::Result<()> {
-        self.header.write(w).await?;
+#[async_trait]
+impl<'a> AsyncOps for PacketRef<'a> {
+    async fn write<W: AsyncWrite + Unpin + Send>(&self, w: &mut W) -> io::Result<()> {
+        AsyncOps::write(self.header, w).await?;
         self.extras.write(w).await?;
         w.write_all(self.key).await?;
         w.write_all(self.val).await?;
 
         Ok(())
     }
+    /// unimplemented
+    async fn read<R: AsyncRead + Unpin + Send>(_r: &mut R) -> io::Result<Self> {
+        unimplemented!()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Extras, Opcode, Packet, Status, SyncOps};
+
+    use std::io::Write;
+    use std::net::TcpStream;
+
+    use bytes::{Buf, Bytes};
+
+    fn test_stream() -> TcpStream {
+        TcpStream::connect("127.0.0.1:11211").unwrap()
+    }
 
     #[test]
-    fn basics() {
-        let header = PacketHeader::request(Opcode::Flush);
-        let extras = Extras::Flush { expiration: 1234 };
-        let key = "test:binary_protocol:hello";
-        let val = "world";
-        let packet = Packet::new(header, extras, key.into(), val.into());
-        let mut buf = vec![];
-        packet.write_sync(&mut buf).unwrap();
-        let mut r = buf.as_slice();
-        let packet_read = Packet::read_sync(&mut r).unwrap();
-        assert_eq!(packet, packet_read);
+    fn test_binary_protocol() {
+        let mut stream = test_stream();
+
+        {
+            let req_packet = Packet::request(
+                Opcode::Set,
+                0,
+                0,
+                0,
+                Extras::Store {
+                    flags: 0,
+                    expiration: 0,
+                },
+                b"test:binary_proto:hello".as_ref().into(),
+                b"world".as_ref().into(),
+            );
+
+            req_packet.write(&mut stream).unwrap();
+            stream.flush().unwrap();
+
+            let resp_packet = Packet::read(&mut stream).unwrap();
+
+            assert_eq!(resp_packet.status(), Status::NoError);
+        }
+
+        {
+            let req_packet = Packet::request(
+                Opcode::Get,
+                0,
+                0,
+                0,
+                Extras::None,
+                b"test:binary_proto:hello".as_ref().into(),
+                Bytes::new(),
+            );
+
+            req_packet.write(&mut stream).unwrap();
+            stream.flush().unwrap();
+
+            let resp_packet = Packet::read(&mut stream).unwrap();
+
+            assert_eq!(resp_packet.status(), Status::NoError);
+            assert_eq!(&resp_packet.val.bytes(), b"world");
+        }
+
+        {
+            let req_packet = Packet::request(
+                Opcode::Delete,
+                0,
+                0,
+                0,
+                Extras::None,
+                b"test:binary_proto:hello".as_ref().into(),
+                Bytes::new(),
+            );
+
+            req_packet.write(&mut stream).unwrap();
+            stream.flush().unwrap();
+
+            let resp_packet = Packet::read(&mut stream).unwrap();
+
+            assert_eq!(resp_packet.status(), Status::NoError);
+        }
     }
 }

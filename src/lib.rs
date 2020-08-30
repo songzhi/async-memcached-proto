@@ -5,4 +5,4 @@ mod packet;
 
 pub use code::{Magic, Opcode, Status};
 pub use error::{Error, Result};
-pub use packet::{Extras, Packet, PacketHeader, PacketRef};
+pub use packet::{AsyncOps, Extras, Packet, PacketHeader, PacketRef, SyncOps};
