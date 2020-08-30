@@ -1,5 +1,5 @@
 //! [Memcached Binary Protocol](https://github.com/memcached/memcached/wiki/BinaryProtocolRevamped)
-use super::code::{Magic, Opcode, Status};
+use crate::code::{Magic, Opcode, Status};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use bytes::{Buf, Bytes, BytesMut};
 use futures_lite::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -283,7 +283,7 @@ impl Packet {
     ///
     /// # Examples
     /// ```rust
-    /// use async_memcached_proto::binary::{Packet, PacketHeader, Opcode, Extras};
+    /// use memcached_proto::{Packet, PacketHeader, Opcode, Extras};
     /// use bytes::Bytes;
     ///
     /// let p = Packet::request(Opcode::NoOp, 0, 0, 0, Extras::None, Bytes::new(), Bytes::new());
@@ -320,7 +320,7 @@ impl Packet {
     ///
     /// # Examples
     /// ```rust
-    /// use async_memcached_proto::binary::{Packet, PacketHeader, Opcode, Extras, Status};
+    /// use memcached_proto::{Packet, PacketHeader, Opcode, Extras, Status};
     /// use bytes::Bytes;
     ///
     /// let p = Packet::response(Opcode::NoOp, Status::NoError, 0, 0,
@@ -360,7 +360,7 @@ impl Packet {
     /// by checking args.
     /// # Examples
     /// ```rust
-    /// use async_memcached_proto::binary::{Packet, PacketHeader, Opcode, Extras};
+    /// use memcached_proto::{Packet, PacketHeader, Opcode, Extras};
     /// use bytes::Bytes;
     ///
     /// let p = Packet::new(PacketHeader::request(Opcode::NoOp),
